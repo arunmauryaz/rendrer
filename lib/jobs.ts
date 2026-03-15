@@ -1,0 +1,1 @@
+export const jobs = new Map<string, {status: 'processing' | 'completed' | 'failed', progress: number, output: string[], files?: string[]}>();
