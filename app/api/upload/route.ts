@@ -32,19 +32,82 @@ export async function POST(request: NextRequest) {
 
     const blenderPath = '/opt/blender/blender'; // adjust path
 
-    let args: string[];
+    // Generate Python script for GPU setup and rendering
+    let scriptContent = `
+import bpy
+
+print("---- Blender GPU Render Script ----")
+
+# Set render engine to Cycles
+bpy.context.scene.render.engine = "CYCLES"
+
+# Detect devices
+prefs = bpy.context.preferences.addons["cycles"].preferences
+prefs.get_devices()
+
+# Use OPTIX
+prefs.compute_device_type = "OPTIX"
+
+for device in prefs.devices:
+    print("Device found:", device.name, device.type)
+    if device.type == "OPTIX":
+        device.use = True
+
+# Enable GPU rendering
+bpy.context.scene.cycles.device = "GPU"
+
+# Performance settings
+bpy.context.scene.cycles.samples = 128
+bpy.context.scene.cycles.use_adaptive_sampling = True
+bpy.context.scene.cycles.use_denoising = True
+`;
+
+    const scriptPath = path.join(outputDir, 'render.py');
+
     if (renderType === 'single') {
       const frame = formData.get('frame') as string;
-      args = ['-b', filePath, '-f', frame, '-o', path.join(outputDir, 'frame_####.png'), '--gpu-backend', 'cuda', '--cycles-device', 'CUDA'];
+      scriptContent += `
+# Single frame render
+bpy.context.scene.frame_current = ${parseInt(frame)}
+bpy.context.scene.render.filepath = "${outputDir}/frame_"
+print("GPU enabled. Starting render...")
+bpy.ops.render.render(write_still=True)
+`;
     } else {
       const startFrame = formData.get('startFrame') as string;
       const endFrame = formData.get('endFrame') as string;
       if (renderType === 'range') {
-        args = ['-b', filePath, '-s', startFrame, '-e', endFrame, '-a', '-o', path.join(outputDir, 'frame_####.png'), '--gpu-backend', 'cuda', '--cycles-device', 'CUDA'];
+        scriptContent += `
+# Frame range render
+bpy.context.scene.frame_start = ${parseInt(startFrame)}
+bpy.context.scene.frame_end = ${parseInt(endFrame)}
+bpy.context.scene.render.filepath = "${outputDir}/frame_"
+print("GPU enabled. Starting animation render...")
+bpy.ops.render.render(animation=True)
+`;
       } else { // video
-        args = ['-b', filePath, '-s', startFrame, '-e', endFrame, '-a', '-F', 'FFMPEG', '-f', 'MPEG4', '-o', path.join(outputDir, 'video.mp4'), '--gpu-backend', 'cuda', '--cycles-device', 'CUDA'];
+        scriptContent += `
+# Video render
+bpy.context.scene.frame_start = ${parseInt(startFrame)}
+bpy.context.scene.frame_end = ${parseInt(endFrame)}
+bpy.context.scene.render.filepath = "${outputDir}/video"
+bpy.context.scene.render.image_settings.file_format = 'FFMPEG'
+bpy.context.scene.render.ffmpeg.format = 'MPEG4'
+bpy.context.scene.render.ffmpeg.codec = 'H264'
+bpy.context.scene.render.ffmpeg.constant_rate_factor = 'HIGH'
+print("GPU enabled. Starting video render...")
+bpy.ops.render.render(animation=True)
+`;
       }
     }
+
+    scriptContent += `
+print("Render finished.")
+`;
+
+    fs.writeFileSync(scriptPath, scriptContent);
+
+    const args = ['-b', filePath, '-P', scriptPath];
 
     const env = {
       ...process.env,
