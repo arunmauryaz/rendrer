@@ -35,38 +35,62 @@ export async function POST(request: NextRequest) {
     let args: string[];
     if (renderType === 'single') {
       const frame = formData.get('frame') as string;
-      args = ['-b', filePath, '-f', frame, '-o', path.join(outputDir, 'frame_####.png'), '--cycles-device', 'CUDA'];
+      args = ['-b', filePath, '-f', frame, '-o', path.join(outputDir, 'frame_####.png'), '--gpu-backend', 'cuda', '--cycles-device', 'CUDA'];
     } else {
       const startFrame = formData.get('startFrame') as string;
       const endFrame = formData.get('endFrame') as string;
       if (renderType === 'range') {
-        args = ['-b', filePath, '-s', startFrame, '-e', endFrame, '-a', '-o', path.join(outputDir, 'frame_####.png'), '--cycles-device', 'CUDA'];
+        args = ['-b', filePath, '-s', startFrame, '-e', endFrame, '-a', '-o', path.join(outputDir, 'frame_####.png'), '--gpu-backend', 'cuda', '--cycles-device', 'CUDA'];
       } else { // video
-        args = ['-b', filePath, '-s', startFrame, '-e', endFrame, '-a', '-F', 'FFMPEG', '-f', 'MPEG4', '-o', path.join(outputDir, 'video.mp4'), '--cycles-device', 'CUDA'];
+        args = ['-b', filePath, '-s', startFrame, '-e', endFrame, '-a', '-F', 'FFMPEG', '-f', 'MPEG4', '-o', path.join(outputDir, 'video.mp4'), '--gpu-backend', 'cuda', '--cycles-device', 'CUDA'];
       }
     }
 
-    const proc = spawn(blenderPath, args);
-    proc.stdout.on('data', (data) => {
+    const env = {
+      ...process.env,
+      LD_LIBRARY_PATH: '/usr/local/cuda/lib64:/usr/lib/nvidia:/usr/lib/x86_64-linux-gnu:' + (process.env.LD_LIBRARY_PATH || ''),
+      PATH: '/usr/local/cuda/bin:' + (process.env.PATH || '')
+    };
+
+    // Check available devices
+    const checkProc = spawn(blenderPath, ['--cycles-print-devices'], { env });
+    checkProc.stdout.on('data', (data) => {
       const job = jobs.get(jobId);
-      if (job) job.output.push(data.toString());
+      if (job) job.output.push('Available devices:\n' + data.toString());
     });
-    proc.stderr.on('data', (data) => {
-      const job = jobs.get(jobId);
-      if (job) job.output.push(data.toString());
-    });
-    proc.on('close', (code) => {
-      const job = jobs.get(jobId);
-      if (job) {
-        if (code === 0) {
-          job.status = 'completed';
-          job.progress = 100;
-          const files = fs.readdirSync(outputDir).filter(f => f.endsWith('.png') || f.endsWith('.mp4'));
-          job.files = files;
-        } else {
+    checkProc.on('close', (checkCode) => {
+      if (checkCode !== 0) {
+        const job = jobs.get(jobId);
+        if (job) {
           job.status = 'failed';
+          job.output.push('Failed to check GPU devices');
         }
+        return;
       }
+
+      // Start rendering
+      const proc = spawn(blenderPath, args, { env });
+      proc.stdout.on('data', (data) => {
+        const job = jobs.get(jobId);
+        if (job) job.output.push(data.toString());
+      });
+      proc.stderr.on('data', (data) => {
+        const job = jobs.get(jobId);
+        if (job) job.output.push(data.toString());
+      });
+      proc.on('close', (code) => {
+        const job = jobs.get(jobId);
+        if (job) {
+          if (code === 0) {
+            job.status = 'completed';
+            job.progress = 100;
+            const files = fs.readdirSync(outputDir).filter(f => f.endsWith('.png') || f.endsWith('.mp4'));
+            job.files = files;
+          } else {
+            job.status = 'failed';
+          }
+        }
+      });
     });
 
     return NextResponse.json({ jobId });
